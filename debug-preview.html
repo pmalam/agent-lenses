@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>agent-lenses debug preview</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, sans-serif; margin: 0; display: flex; height: 100vh; background: #0f172a; color: #e2e8f0; }
+  .col { padding: 16px; overflow-y: auto; }
+  .left { width: 40%; border-right: 1px solid #1e293b; }
+  .right { width: 60%; display: flex; flex-direction: column; }
+  textarea { width: 100%; height: 100px; background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 8px; font-family: inherit; }
+  button { margin-top: 8px; background: #6366f1; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .status { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; text-transform: uppercase; }
+  .status.checklisting, .status.running, .status.evaluating { background: #422006; color: #fbbf24; }
+  .status.passed { background: #052e16; color: #4ade80; }
+  .status.failed, .status.max_iterations { background: #450a0a; color: #f87171; }
+  .thought { padding: 6px 0; border-bottom: 1px solid #1e293b; font-size: 13px; }
+  .thought .time { color: #64748b; font-size: 11px; }
+  .criterion { padding: 4px 0; font-size: 13px; }
+  .iteration { margin: 10px 0; padding: 10px; background: #1e293b; border-radius: 6px; }
+  .iteration .verdict-pass { color: #4ade80; }
+  .iteration .verdict-fail { color: #f87171; }
+  #preview-frame { flex: 1; background: white; border: none; }
+  #code-view { background: #1e293b; padding: 12px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; max-height: 200px; overflow-y: auto; color: #a5b4fc; }
+  a { color: #818cf8; }
+</style>
+</head>
+<body>
+
+<div class="col left">
+  <h3>agent-lenses debug preview</h3>
+  <textarea id="query" placeholder="Task for the executor...">Edit this FeatureCard component (a row in a feature-flag settings list) to match these style requirements:
+
+- The feature name is bold, the description below it is smaller and gray (text-gray-500), not the same size/weight as the name.
+- When the feature is enabled: show a small pill badge that says "Active" with a green background and green text.
+- When disabled: the entire card (name, description, icon) drops to 60% opacity - not just the toggle.
+- 8px gap (gap-2) between the toggle switch and the label text, not the default flex spacing.
+- The card has a hover state: subtle shadow (shadow-sm -> shadow-md) and a slightly darker border, but only on hover, not by default.
+- Rounded corners (rounded-lg), not sharp or fully rounded.
+
+Use only built-in HTML elements and React state (useState) - no external component libraries (e.g. no @headlessui/react, no MUI). Respond with only the component code.</textarea>
+  <br />
+  <button id="run-btn" onclick="startRun()">Run</button>
+  <span id="status-badge"></span>
+
+  <h4>Checklist</h4>
+  <div id="checklist">-</div>
+
+  <h4>Thoughts</h4>
+  <div id="thoughts"></div>
+
+  <h4>Iterations</h4>
+  <div id="iterations"></div>
+
+  <p><a id="trace-link" href="#" target="_blank" style="display:none;">View Logfire trace →</a></p>
+</div>
+
+<div class="col right">
+  <h3>Live preview <span style="font-weight:400;font-size:12px;color:#64748b;">(best-effort JSX render - not the real Sandpack renderer)</span></h3>
+  <div id="code-view">No output yet.</div>
+  <iframe id="preview-frame"></iframe>
+</div>
+
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script>
+const BACKEND = "http://localhost:8000";
+
+function el(id) { return document.getElementById(id); }
+
+function fmtTime(iso) {
+  return new Date(iso).toLocaleTimeString();
+}
+
+function render(state) {
+  const badge = el("status-badge");
+  badge.textContent = state.status;
+  badge.className = "status " + state.status;
+
+  el("checklist").innerHTML = state.checklist
+    ? state.checklist.criteria.map(c => `<div class="criterion">☐ ${escapeHtml(c)}</div>`).join("")
+      + `<div class="criterion" style="color:#64748b;">time limit: ${state.checklist.time_limit_minutes}min, token budget: ${state.checklist.token_budget}</div>`
+    : "-";
+
+  el("thoughts").innerHTML = state.thoughts
+    .map(t => `<div class="thought"><span class="time">${fmtTime(t.at)}</span> ${escapeHtml(t.message)}</div>`)
+    .reverse()
+    .join("");
+
+  el("iterations").innerHTML = state.iterations
+    .map(it => `<div class="iteration">
+      <b>Attempt ${it.index + 1}</b>
+      <div class="${it.verdict && it.verdict.passed ? 'verdict-pass' : 'verdict-fail'}">
+        ${it.verdict ? (it.verdict.passed ? "PASSED" : "FAILED") : "..."}
+      </div>
+      ${it.verdict ? `<div style="font-size:12px;color:#94a3b8;">${escapeHtml(it.verdict.reasoning)}</div>` : ""}
+      ${it.verdict && it.verdict.failed_criteria.length ? `<div style="font-size:12px;color:#f87171;">Failed: ${it.verdict.failed_criteria.map(escapeHtml).join("; ")}</div>` : ""}
+    </div>`)
+    .join("");
+
+  if (state.trace_url) {
+    const link = el("trace-link");
+    link.href = state.trace_url;
+    link.style.display = "inline";
+  }
+
+  if (state.final_output) {
+    el("code-view").textContent = state.final_output;
+    renderComponent(state.final_output);
+  }
+
+  el("run-btn").disabled = !isTerminal(state.status);
+}
+
+function isTerminal(status) {
+  return ["passed", "failed", "max_iterations"].includes(status);
+}
+
+function escapeHtml(s) {
+  const d = document.createElement("div");
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function extractComponent(rawCode) {
+  let code = rawCode.replace(/^```[a-z]*\n?/i, "").replace(/```\s*$/, "").trim();
+  code = code.replace(/^\s*import[^\n]*\n/gm, "");
+
+  let name = null;
+
+  // export default function Foo(...) / export default class Foo ...
+  let m = code.match(/export default (?:function|class)\s+(\w+)/);
+  if (m) {
+    name = m[1];
+    code = code.replace(/export default\s+/, "");
+  }
+
+  // export default Foo;  (trailing reference to an already-declared identifier)
+  if (!name) {
+    m = code.match(/export default (\w+);?\s*$/m);
+    if (m) {
+      name = m[1];
+      code = code.replace(/export default \w+;?\s*$/m, "");
+    }
+  }
+
+  // named export: export const/function/class Foo ...
+  if (!name) {
+    m = code.match(/export (?:const|let|var|function|class)\s+(\w+)/);
+    if (m) {
+      name = m[1];
+      code = code.replace(/^export\s+/m, "");
+    }
+  }
+
+  // fallback: export default <anonymous arrow fn / expression>
+  if (!name && /export default/.test(code)) {
+    code = code.replace(/export default\s+/, "const __Default__ = ");
+    name = "__Default__";
+  }
+
+  // strip any other stray `export` keywords left over (e.g. multiple named exports)
+  code = code.replace(/^export\s+/gm, "");
+
+  if (!name) {
+    throw new Error("Could not find a component to render (no export found in the output).");
+  }
+
+  code += `\nreturn ${name};`;
+  return code;
+}
+
+function renderComponent(rawCode) {
+  const frame = el("preview-frame");
+  const doc = frame.contentDocument;
+  try {
+    const extracted = extractComponent(rawCode);
+    // allowReturnOutsideFunction: the appended `return <Component>;` is only valid
+    // once this code is wrapped in `new Function(...)` below, but Babel's parser
+    // rejects a top-level return in a plain Program by default - tell it to allow it.
+    const transpiled = Babel.transform(extracted, {
+      presets: ["react"],
+      parserOpts: { allowReturnOutsideFunction: true },
+    }).code;
+    const factory = new Function(
+      "React", "useState", "useEffect", "useMemo", "useCallback", "useRef",
+      transpiled
+    );
+    const Component = factory(
+      React, React.useState, React.useEffect, React.useMemo, React.useCallback, React.useRef
+    );
+
+    doc.open();
+    doc.write(`<!DOCTYPE html><html><head><script src="https://cdn.tailwindcss.com"><\/script>
+      <style>
+        html, body { height: 100%; margin: 0; background: #e2e8f0; }
+        body { display: flex; align-items: center; justify-content: center; padding: 24px; }
+        #mini-page {
+          width: 360px;
+          max-width: 90%;
+          background: white;
+          border-radius: 10px;
+          box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+          overflow: hidden;
+        }
+        #mini-page-bar {
+          height: 22px;
+          background: #f1f5f9;
+          border-bottom: 1px solid #e2e8f0;
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          padding: 0 8px;
+        }
+        #mini-page-bar span { width: 7px; height: 7px; border-radius: 50%; background: #cbd5e1; }
+        #root { padding: 16px; }
+      </style>
+    </head>
+    <body>
+      <div id="mini-page">
+        <div id="mini-page-bar"><span></span><span></span><span></span></div>
+        <div id="root"></div>
+      </div>
+    </body></html>`);
+    doc.close();
+
+    // Mock props: generated components have varied across runs between individual
+    // props (name, description, isEnabled...) and a single nested object prop
+    // (feature: {...}) - cover both shapes rather than guessing one.
+    const mockFeature = { name: "Sample Feature", description: "A sample feature description.", enabled: true, isEnabled: true, icon: "⚡" };
+    const mockProps = { ...mockFeature, feature: mockFeature, onToggle: () => {}, onChange: () => {} };
+
+    // wait a tick for tailwind's CDN script to load inside the iframe
+    setTimeout(() => {
+      try {
+        const root = ReactDOM.createRoot(doc.getElementById("root"));
+        root.render(React.createElement(Component, mockProps));
+      } catch (renderErr) {
+        doc.getElementById("root").innerHTML =
+          `<pre style="color:red;white-space:pre-wrap;">Render failed: ${escapeHtml(renderErr.message)}\n\n`
+          + `(This preview passes generic mock props - a component expecting a differently-shaped prop can still fail here even though the code itself is fine.)</pre>`;
+      }
+    }, 200);
+  } catch (e) {
+    doc.open();
+    doc.write(`<pre style="color:red;padding:16px;">Render failed: ${escapeHtml(e.message)}</pre>`);
+    doc.close();
+  }
+}
+
+let currentSource = null;
+
+async function startRun() {
+  const query = el("query").value;
+  el("run-btn").disabled = true;
+  el("thoughts").innerHTML = "";
+  el("iterations").innerHTML = "";
+  el("checklist").innerHTML = "-";
+  el("code-view").textContent = "No output yet.";
+  el("trace-link").style.display = "none";
+
+  const res = await fetch(`${BACKEND}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query }),
+  });
+  const { run_id } = await res.json();
+
+  if (currentSource) currentSource.close();
+  currentSource = new EventSource(`${BACKEND}/runs/${run_id}/stream`);
+  currentSource.onmessage = (evt) => {
+    const state = JSON.parse(evt.data);
+    render(state);
+    if (isTerminal(state.status)) {
+      currentSource.close();
+    }
+  };
+}
+</script>
+
+</body>
+</html>
