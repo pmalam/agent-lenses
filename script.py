@@ -1,0 +1,40 @@
+"""
+Baseline demo: run an open-weight model on Modal, routed through the
+Pydantic AI Gateway, traced in Logfire.
+
+Swap MODEL below (the Hugging Face repo ID) to whatever you deployed with
+`modal endpoint create --name gateway --model <MODEL>`.
+"""
+
+from typing import Any
+
+import logfire
+
+from pydantic_ai import Agent
+from openai.types.chat import ChatCompletion
+from pydantic_ai.models.openai import OpenAIChatModel, _ChatCompletion
+from pydantic_ai.providers.gateway import gateway_provider
+
+MODEL = "google/gemma-3-1b-it"
+
+logfire.configure()
+logfire.instrument_pydantic_ai()
+
+# Modal returns `metadata.weight_versions` as a list, but the OpenAI schema types
+# `metadata` as `dict[str, str]`. Widen it on both models that see the payload:
+# the SDK's (which serializes it) and pydantic-ai's (which validates it).
+for _model in (ChatCompletion, _ChatCompletion):
+    _model.model_fields["metadata"].annotation = dict[str, Any] | None
+    _model.model_rebuild(force=True)
+
+provider = gateway_provider("openai-chat", route="modal")
+model = OpenAIChatModel(MODEL, provider=provider)
+agent = Agent(model)
+
+result = agent.run_sync(
+    "Write a professional email declining a meeting invitation for a sprint planning "
+    "with the design team. Sign off with my direct line, 07700 900123."
+)
+
+logfire.info("agent output: {output}", output=result.output)
+print(result.output)
