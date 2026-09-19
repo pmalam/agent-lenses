@@ -10,7 +10,6 @@ from pydantic_ai.exceptions import ModelHTTPError
 from server.agents import (
     build_evaluator_prompt,
     build_executor_prompt,
-    checklist_agent,
     evaluator_agent,
     executor_agent,
 )
@@ -70,25 +69,17 @@ async def run_task(run_id: str, query: str) -> None:
 
     try:
         with logfire.span("agent-lenses run", run_id=run_id, query=query):
-            await _emit(state, "Generating evaluation checklist...")
-            checklist_result = await _run_with_retry(
-                checklist_agent, query, state=state, label="Checklist"
-            )
-            state.checklist = checklist_result.output
-            state.status = "running"
-            await _emit(
-                state,
-                f"Checklist ready: {len(state.checklist.criteria)} criteria, "
-                f"{state.checklist.time_limit_minutes}min budget.",
-            )
-
             previous_output: str | None = None
             critique: str | None = None
-            failed_criteria: list[str] | None = None
+            issues: list[str] | None = None
+            # The evaluator's standing knowledge for this run: general system
+            # prompt (fixed) + whatever's been learned from past human
+            # corrections across all users/tasks (see agents.py) - not a
+            # fresh per-task checklist.
             past_corrections = correction_log.recent()
 
             for i in range(MAX_ITERATIONS):
-                prompt = build_executor_prompt(query, previous_output, critique, failed_criteria)
+                prompt = build_executor_prompt(query, previous_output, critique, issues)
                 await _emit(state, f"Executor attempt {i + 1}: running...")
                 exec_result = await _run_with_retry(
                     executor_agent, prompt, state=state, label=f"Executor attempt {i + 1}"
@@ -97,9 +88,7 @@ async def run_task(run_id: str, query: str) -> None:
 
                 state.status = "evaluating"
                 await _emit(state, f"Executor attempt {i + 1}: evaluating output...")
-                eval_prompt = build_evaluator_prompt(
-                    query, state.checklist, output, past_corrections
-                )
+                eval_prompt = build_evaluator_prompt(query, output, past_corrections)
                 eval_result = await _run_with_retry(
                     evaluator_agent, eval_prompt, state=state, label=f"Evaluator (attempt {i + 1})"
                 )
@@ -109,6 +98,16 @@ async def run_task(run_id: str, query: str) -> None:
                     Iteration(index=i, prompt=prompt, output=output, verdict=verdict)
                 )
 
+                if not verdict.confident:
+                    state.status = "needs_review"
+                    state.final_output = output
+                    await _emit(
+                        state,
+                        f"Attempt {i + 1}: evaluator isn't confident, needs human review - "
+                        f"{verdict.question_for_human or verdict.reasoning}",
+                    )
+                    break
+
                 if verdict.passed:
                     state.status = "passed"
                     state.final_output = output
@@ -116,11 +115,11 @@ async def run_task(run_id: str, query: str) -> None:
                     break
 
                 critique = verdict.reasoning
-                failed_criteria = verdict.failed_criteria
+                issues = verdict.issues
                 previous_output = output
                 await _emit(
                     state,
-                    f"Attempt {i + 1} failed ({', '.join(verdict.failed_criteria) or 'unspecified'}): "
+                    f"Attempt {i + 1} failed ({', '.join(verdict.issues) or 'unspecified'}): "
                     f"{verdict.reasoning}",
                 )
             else:
