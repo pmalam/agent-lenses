@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>agent-lenses debug preview</title>
+<title>AgentLenses</title>
 <style>
   * { box-sizing: border-box; }
   body { font-family: -apple-system, sans-serif; margin: 0; display: flex; height: 100vh; background: #0f172a; color: #e2e8f0; }
@@ -23,14 +23,13 @@
   .iteration .verdict-pass { color: #4ade80; }
   .iteration .verdict-fail { color: #f87171; }
   #preview-frame { flex: 1; background: white; border: none; }
-  #code-view { background: #1e293b; padding: 12px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; max-height: 200px; overflow-y: auto; color: #a5b4fc; }
   a { color: #818cf8; }
 </style>
 </head>
 <body>
 
 <div class="col left">
-  <h3>agent-lenses debug preview</h3>
+  <h3 style="font-size:22px;font-weight:700;letter-spacing:-0.02em;background:linear-gradient(90deg,#818cf8,#c084fc);-webkit-background-clip:text;background-clip:text;color:transparent;">AgentLenses</h3>
   <textarea id="query" placeholder="Task for the executor...">Edit this FeatureCard component (a row in a feature-flag settings list) to match these style requirements:
 
 - The feature name is bold, the description below it is smaller and gray (text-gray-500), not the same size/weight as the name.
@@ -58,8 +57,7 @@ Use only built-in HTML elements and React state (useState) - no external compone
 </div>
 
 <div class="col right">
-  <h3>Live preview <span style="font-weight:400;font-size:12px;color:#64748b;">(best-effort JSX render - not the real Sandpack renderer)</span></h3>
-  <div id="code-view">No output yet.</div>
+  <h3>Live Preview <span style="font-weight:400;font-size:12px;color:#64748b;">(best-effort JSX render - not the real Sandpack renderer)</span></h3>
   <iframe id="preview-frame"></iframe>
 </div>
 
@@ -109,7 +107,6 @@ function render(state) {
   }
 
   if (state.final_output) {
-    el("code-view").textContent = state.final_output;
     renderComponent(state.final_output);
   }
 
@@ -260,7 +257,6 @@ async function startRun() {
   el("thoughts").innerHTML = "";
   el("iterations").innerHTML = "";
   el("checklist").innerHTML = "-";
-  el("code-view").textContent = "No output yet.";
   el("trace-link").style.display = "none";
 
   const res = await fetch(`${BACKEND}/run`, {
