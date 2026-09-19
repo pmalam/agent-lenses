@@ -8,16 +8,24 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class RunChecklist(BaseModel):
-    criteria: list[str] = Field(description="Concrete, checkable pass/fail criteria for the task")
-    time_limit_minutes: int = Field(description="Wall-clock budget for the whole run")
-    token_budget: int = Field(description="Approximate total token budget across all iterations")
-
-
 class Verdict(BaseModel):
     passed: bool
     reasoning: str
-    failed_criteria: list[str] = Field(default_factory=list)
+    issues: list[str] = Field(
+        default_factory=list,
+        description="Specific problems found in this attempt relative to the "
+        "stated requirements - not references to a fixed checklist, there isn't one.",
+    )
+    confident: bool = Field(
+        default=True,
+        description="False when the criteria are genuinely ambiguous/subjective "
+        "and a human should weigh in rather than trusting this verdict outright.",
+    )
+    question_for_human: str | None = Field(
+        default=None,
+        description="Set only when confident=False - the specific thing a human "
+        "should confirm or decide.",
+    )
 
 
 class Iteration(BaseModel):
@@ -33,15 +41,14 @@ class ThoughtEvent(BaseModel):
 
 
 RunStatus = Literal[
-    "checklisting", "running", "evaluating", "passed", "failed", "max_iterations"
+    "running", "evaluating", "passed", "failed", "max_iterations", "needs_review"
 ]
 
 
 class RunState(BaseModel):
     run_id: str
     query: str
-    status: RunStatus = "checklisting"
-    checklist: RunChecklist | None = None
+    status: RunStatus = "running"
     iterations: list[Iteration] = Field(default_factory=list)
     thoughts: list[ThoughtEvent] = Field(default_factory=list)
     final_output: str | None = None

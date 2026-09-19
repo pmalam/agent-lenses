@@ -13,9 +13,16 @@
   button { margin-top: 8px; background: #6366f1; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   .status { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; text-transform: uppercase; }
-  .status.checklisting, .status.running, .status.evaluating { background: #422006; color: #fbbf24; }
+  .status.running, .status.evaluating { background: #422006; color: #fbbf24; }
   .status.passed { background: #052e16; color: #4ade80; }
   .status.failed, .status.max_iterations { background: #450a0a; color: #f87171; }
+  .status.needs_review { background: #422006; color: #fbbf24; }
+  #review-prompt { display: none; margin: 12px 0; padding: 12px; background: #422006; border: 1px solid #78350f; border-radius: 8px; }
+  #review-prompt.visible { display: block; }
+  #review-prompt .question { font-size: 13px; margin-bottom: 10px; color: #fde68a; }
+  #review-prompt button { margin-right: 8px; margin-top: 0; }
+  #review-approve { background: #16a34a; }
+  #review-reject { background: #dc2626; }
   .thought { padding: 6px 0; border-bottom: 1px solid #1e293b; font-size: 13px; }
   .thought .time { color: #64748b; font-size: 11px; }
   .criterion { padding: 4px 0; font-size: 13px; }
@@ -44,8 +51,14 @@ Use only built-in HTML elements and React state (useState) - no external compone
   <button id="run-btn" onclick="startRun()">Run</button>
   <span id="status-badge"></span>
 
-  <h4>Checklist</h4>
-  <div id="checklist">-</div>
+  <div id="review-prompt">
+    <div class="question" id="review-question"></div>
+    <button id="review-approve" onclick="resolveReview('approve')">Approve</button>
+    <button id="review-reject" onclick="resolveReview('reject')">Reject &amp; correct</button>
+  </div>
+
+  <h4>Evaluator's learned context <span style="font-weight:400;font-size:11px;color:#64748b;">(accumulated corrections, applies across all tasks)</span></h4>
+  <div id="corrections">-</div>
 
   <h4>Thoughts</h4>
   <div id="thoughts"></div>
@@ -79,10 +92,17 @@ function render(state) {
   badge.textContent = state.status;
   badge.className = "status " + state.status;
 
-  el("checklist").innerHTML = state.checklist
-    ? state.checklist.criteria.map(c => `<div class="criterion">☐ ${escapeHtml(c)}</div>`).join("")
-      + `<div class="criterion" style="color:#64748b;">time limit: ${state.checklist.time_limit_minutes}min, token budget: ${state.checklist.token_budget}</div>`
-    : "-";
+  const reviewPanel = el("review-prompt");
+  if (state.status === "needs_review") {
+    const lastIteration = state.iterations[state.iterations.length - 1];
+    const verdict = lastIteration && lastIteration.verdict;
+    const question = (verdict && (verdict.question_for_human || verdict.reasoning))
+      || "The evaluator flagged this run for human review.";
+    el("review-question").textContent = question;
+    reviewPanel.classList.add("visible");
+  } else {
+    reviewPanel.classList.remove("visible");
+  }
 
   el("thoughts").innerHTML = state.thoughts
     .map(t => `<div class="thought"><span class="time">${fmtTime(t.at)}</span> ${escapeHtml(t.message)}</div>`)
@@ -96,7 +116,7 @@ function render(state) {
         ${it.verdict ? (it.verdict.passed ? "PASSED" : "FAILED") : "..."}
       </div>
       ${it.verdict ? `<div style="font-size:12px;color:#94a3b8;">${escapeHtml(it.verdict.reasoning)}</div>` : ""}
-      ${it.verdict && it.verdict.failed_criteria.length ? `<div style="font-size:12px;color:#f87171;">Failed: ${it.verdict.failed_criteria.map(escapeHtml).join("; ")}</div>` : ""}
+      ${it.verdict && it.verdict.issues.length ? `<div style="font-size:12px;color:#f87171;">Issues: ${it.verdict.issues.map(escapeHtml).join("; ")}</div>` : ""}
     </div>`)
     .join("");
 
@@ -250,22 +270,10 @@ function renderComponent(rawCode) {
 }
 
 let currentSource = null;
+let currentRunId = null;
 
-async function startRun() {
-  const query = el("query").value;
-  el("run-btn").disabled = true;
-  el("thoughts").innerHTML = "";
-  el("iterations").innerHTML = "";
-  el("checklist").innerHTML = "-";
-  el("trace-link").style.display = "none";
-
-  const res = await fetch(`${BACKEND}/run`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query }),
-  });
-  const { run_id } = await res.json();
-
+function subscribeToRun(run_id) {
+  currentRunId = run_id;
   if (currentSource) currentSource.close();
   currentSource = new EventSource(`${BACKEND}/runs/${run_id}/stream`);
   currentSource.onmessage = (evt) => {
@@ -276,6 +284,59 @@ async function startRun() {
     }
   };
 }
+
+async function loadCorrections() {
+  const res = await fetch(`${BACKEND}/corrections`);
+  const corrections = await res.json();
+  el("corrections").innerHTML = corrections.length
+    ? corrections.map(c => `<div class="criterion">- ${escapeHtml(c.reason)}</div>`).reverse().join("")
+    : `<div class="criterion" style="color:#64748b;">none yet - reject a "needs review" run to add one</div>`;
+}
+
+async function startRun() {
+  const query = el("query").value;
+  el("run-btn").disabled = true;
+  el("thoughts").innerHTML = "";
+  el("iterations").innerHTML = "";
+  el("trace-link").style.display = "none";
+  el("review-prompt").classList.remove("visible");
+
+  const res = await fetch(`${BACKEND}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query }),
+  });
+  const { run_id } = await res.json();
+  subscribeToRun(run_id);
+}
+
+async function resolveReview(action) {
+  if (!currentRunId) return;
+
+  if (action === "approve") {
+    const res = await fetch(`${BACKEND}/runs/${currentRunId}/approve`, { method: "POST" });
+    const state = await res.json();
+    render(state);
+    return;
+  }
+
+  const reason = prompt("Why are you rejecting this? (becomes context for future evaluator runs)");
+  if (!reason) return;
+
+  const res = await fetch(`${BACKEND}/runs/${currentRunId}/mark-failure`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+  const { new_run_id } = await res.json();
+  el("review-prompt").classList.remove("visible");
+  el("thoughts").innerHTML = "";
+  el("iterations").innerHTML = "";
+  loadCorrections();
+  subscribeToRun(new_run_id);
+}
+
+loadCorrections();
 </script>
 
 </body>

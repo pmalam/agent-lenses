@@ -9,7 +9,8 @@ from pydantic import BaseModel
 
 from server.bus import event_bus
 from server.loop import mark_false_negative, run_task
-from server.store import run_store
+from server.models import ThoughtEvent
+from server.store import correction_log, run_store
 
 logfire.configure()
 logfire.instrument_pydantic_ai()
@@ -39,6 +40,14 @@ async def start_run(req: StartRunRequest, background_tasks: BackgroundTasks) -> 
     return StartRunResponse(run_id=run_id)
 
 
+@app.get("/corrections")
+async def list_corrections(limit: int = 20):
+    """The evaluator's accumulated standing context - human corrections learned
+    across all runs/tasks/users, not scoped to any one run. This is what makes
+    the evaluator general rather than a fresh per-task checklist."""
+    return [c.model_dump(mode="json") for c in correction_log.recent(limit=limit)]
+
+
 @app.get("/runs/{run_id}")
 async def get_run(run_id: str):
     state = run_store.get(run_id)
@@ -58,7 +67,7 @@ async def stream_run(run_id: str):
         state = run_store.get(run_id)
         if state is not None:
             yield f"data: {state.model_dump_json()}\n\n"
-            if state.status in ("passed", "failed", "max_iterations"):
+            if state.status in ("passed", "failed", "max_iterations", "needs_review"):
                 return
 
         while True:
@@ -88,3 +97,24 @@ async def mark_failure(
     new_run_id = str(uuid.uuid4())
     background_tasks.add_task(mark_false_negative, run_id, req.reason, new_run_id)
     return MarkFailureResponse(new_run_id=new_run_id)
+
+
+@app.post("/runs/{run_id}/approve")
+async def approve_run(run_id: str):
+    """Human confirms a `needs_review` run's output is actually fine -
+    the other resolution for a low-confidence verdict, alongside
+    /mark-failure (which rejects it and reruns instead)."""
+    state = run_store.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="unknown run_id")
+    if state.status != "needs_review":
+        raise HTTPException(
+            status_code=400, detail=f"run is not awaiting review (status: {state.status})"
+        )
+
+    state.status = "passed"
+    state.thoughts.append(ThoughtEvent(message="Human approved - evaluator's uncertainty was unfounded."))
+    run_store.update(state)
+    await event_bus.publish(run_id, {"type": "state", "state": state.model_dump(mode="json")})
+    event_bus.close(run_id)
+    return state.model_dump(mode="json")

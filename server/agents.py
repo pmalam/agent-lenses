@@ -1,24 +1,7 @@
 from pydantic_ai import Agent
 
 from server.gateway import evaluator_model, executor_model
-from server.models import CorrectionEntry, RunChecklist, Verdict
-
-checklist_agent = Agent(
-    evaluator_model(),
-    output_type=RunChecklist,
-    system_prompt=(
-        "You are a rigorous evaluator preparing to judge another AI agent's work. "
-        "Given a task, produce a short checklist of concrete, checkable pass/fail "
-        "criteria - not vague quality judgments like 'looks good' or 'well styled'. "
-        "If the task specifies exact values (class names, colors, spacing, sizes, "
-        "states), turn each one into its own checklist item naming the exact "
-        "value expected and which element it applies to - e.g. 'disabled state "
-        "applies 60% opacity to the entire card, not just the toggle' rather than "
-        "'disabled state is styled correctly'. Also include a reasonable time "
-        "limit in minutes and a total token budget for a small model to complete "
-        "the task. Keep the checklist to 3-6 items."
-    ),
-)
+from server.models import CorrectionEntry, Verdict
 
 executor_agent = Agent(
     executor_model(),
@@ -29,37 +12,60 @@ executor_agent = Agent(
     ),
 )
 
+# This is the general, standing evaluator prompt - not regenerated per task. It's
+# deliberately generic (applies across any user's task/app, not one checklist),
+# and gets supplemented per-run only with accumulated corrections (see
+# build_evaluator_prompt) - real, specific criteria come from what's actually
+# been learned over time, not from an LLM inventing a fresh rubric each run.
 evaluator_agent = Agent(
     evaluator_model(),
     output_type=Verdict,
     system_prompt=(
-        "You are a strict, rigorous evaluator. Given a task, a checklist of "
-        "pass/fail criteria, and an attempt at the task, judge whether the "
-        "attempt satisfies every checklist item. For styling criteria, check "
-        "the actual code for the literal class names/values named in the "
-        "checklist and which element they're applied to - do not pass an "
-        "item just because *some* styling is present if it's the wrong "
-        "value or on the wrong element. Be specific in `reasoning` about "
-        "what passed or failed. List every failed criterion verbatim in "
-        "`failed_criteria`. Do not pass an attempt that fails any criterion."
+        "You are a strict, rigorous code reviewer. Given a task description "
+        "(the requirements) and an attempt at that task, judge whether the "
+        "attempt genuinely fulfills every requirement actually stated - not "
+        "just plausible-looking code. General things worth checking on every "
+        "review, regardless of what the specific task is:\n"
+        "- The code is syntactically valid and complete (no missing closing "
+        "tags/braces, no truncated statements) - this is a hard requirement "
+        "before anything else matters.\n"
+        "- Every concrete detail named in the requirements (exact values, "
+        "colors, spacing, states, behavior) is implemented literally, on the "
+        "right element - not just 'something similar' or 'the general idea'.\n"
+        "- Nothing required is silently dropped, and nothing broken is "
+        "introduced in something that already worked.\n\n"
+        "List every specific problem you find in `issues` (plain descriptions, "
+        "not references to a checklist - there is no checklist, only the "
+        "stated requirements). `passed` must be consistent with `issues`: "
+        "zero issues means passed=true, any issue means passed=false. Reach "
+        "a decision once - do not second-guess or re-open something you've "
+        "already judged.\n\n"
+        "If something is genuinely ambiguous or subjective (reasonable "
+        "people could disagree, not just 'this needs care to check') - "
+        "including a requirement with no reference, standard, or precedent "
+        "to verify it against - set `confident=False` and use "
+        "`question_for_human` to ask the specific thing you're unsure about, "
+        "instead of forcing a pass or fail you don't actually believe. "
+        "Unresolvable ambiguity belongs in `confident=False`, never in "
+        "`passed=False`. Use this rarely - only for genuine ambiguity, not "
+        "as a way to avoid a hard-but-clear judgment."
     ),
 )
 
 
 def build_evaluator_prompt(
-    query: str, checklist: RunChecklist, output: str, past_corrections: list[CorrectionEntry]
+    query: str, output: str, past_corrections: list[CorrectionEntry]
 ) -> str:
     parts = [
-        f"Task: {query}",
-        "Checklist:\n" + "\n".join(f"- {c}" for c in checklist.criteria),
+        f"Task (the requirements): {query}",
         f"Attempt:\n{output}",
     ]
     if past_corrections:
         parts.append(
-            "Note: a human previously overrode this evaluator's judgment on "
-            "similar tasks because it missed real problems. Be extra rigorous "
-            "about these past misses:\n"
-            + "\n".join(f"- {c.reason}" for c in past_corrections)
+            "Learned from past human corrections - problems this evaluator has "
+            "missed or gotten wrong before, across other tasks. Apply this "
+            "general judgment here too, not just when it happens to match "
+            "exactly:\n" + "\n".join(f"- {c.reason}" for c in past_corrections)
         )
     return "\n\n".join(parts)
 
@@ -68,16 +74,16 @@ def build_executor_prompt(
     query: str,
     previous_output: str | None,
     critique: str | None,
-    failed_criteria: list[str] | None = None,
+    issues: list[str] | None = None,
 ) -> str:
     if previous_output is None:
         return query
-    failed_list = "\n".join(f"- {c}" for c in failed_criteria) if failed_criteria else None
+    issues_list = "\n".join(f"- {c}" for c in issues) if issues else None
     return (
         f"{query}\n\n"
         f"Your previous attempt:\n{previous_output}\n\n"
         f"That attempt failed review for this reason: {critique}\n"
-        + (f"Specifically, these checklist items failed:\n{failed_list}\n" if failed_list else "")
+        + (f"Specifically:\n{issues_list}\n" if issues_list else "")
         + "Produce a corrected attempt that fixes exactly these issues without "
         "regressing anything that already passed."
     )
