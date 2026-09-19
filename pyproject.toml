@@ -1,0 +1,10 @@
+[project]
+name = "agent-lenses"
+version = "0.1.0"
+description = "Watch AI agents stay on track."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "logfire>=5.1.0",
+    "pydantic-ai>=2.45.0",
+]
