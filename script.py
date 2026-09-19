@@ -27,7 +27,7 @@ for _model in (ChatCompletion, _ChatCompletion):
     _model.model_fields["metadata"].annotation = dict[str, Any] | None
     _model.model_rebuild(force=True)
 
-provider = gateway_provider("openai-chat", route="modal")
+provider = gateway_provider("openai-chat", route="agentlenses-provider")
 model = OpenAIChatModel(MODEL, provider=provider)
 agent = Agent(model)
 
